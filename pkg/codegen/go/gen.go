@@ -36,25 +36,6 @@ import (
 	"github.com/pulumi/pulumi/sdk/v2/go/common/util/contract"
 )
 
-type stringSet map[string]struct{}
-
-func newStringSet(s ...string) stringSet {
-	ss := stringSet{}
-	for _, s := range s {
-		ss.add(s)
-	}
-	return ss
-}
-
-func (ss stringSet) add(s string) {
-	ss[s] = struct{}{}
-}
-
-func (ss stringSet) has(s string) bool {
-	_, ok := ss[s]
-	return ok
-}
-
 type typeDetails struct {
 	ptrElement   bool
 	arrayElement bool
@@ -109,7 +90,7 @@ type pkgContext struct {
 	types          []*schema.ObjectType
 	resources      []*schema.Resource
 	functions      []*schema.Function
-	names          stringSet
+	names          codegen.StringSet
 	functionNames  map[*schema.Function]string
 	needsUtils     bool
 	tool           string
@@ -160,11 +141,12 @@ func (pkg *pkgContext) tokenToType(tok string) string {
 	// If the package containing the type's token already has a resource with the
 	// same name, add a `Type` suffix.
 	modPkg, ok := pkg.packages[mod]
-	contract.Assert(ok)
 
 	name = Title(name)
-	if modPkg.names.has(name) {
-		name += "Type"
+	if ok {
+		if modPkg.names.Has(name) {
+			name += "Type"
+		}
 	}
 
 	if mod == pkg.mod {
@@ -537,7 +519,7 @@ func (pkg *pkgContext) genEnumType(w io.Writer, name string, enumType *schema.En
 			return err
 		}
 		e.Name = enumName
-		contract.Assertf(!modPkg.names.has(e.Name), "Name collision for enum constant: %s for %s",
+		contract.Assertf(!modPkg.names.Has(e.Name), "Name collision for enum constant: %s for %s",
 			e.Name, enumType.Token)
 
 		switch reflect.TypeOf(e.Value).Kind() {
@@ -1348,7 +1330,7 @@ func generatePackageContextMap(tool string, pkg *schema.Package, goInfo GoPackag
 				importBasePath:   goInfo.ImportBasePath,
 				typeDetails:      map[*schema.ObjectType]*typeDetails{},
 				enumDetails:      map[*schema.EnumType]*typeDetails{},
-				names:            stringSet{},
+				names:            codegen.NewStringSet(),
 				functionNames:    map[*schema.Function]string{},
 				tool:             tool,
 				modToPkg:         goInfo.ModuleToPackage,
@@ -1372,23 +1354,23 @@ func generatePackageContextMap(tool string, pkg *schema.Package, goInfo GoPackag
 	// In addition, if the optional property's type is itself an object type, we also need to generate pointer
 	// types corresponding to all of it's nested properties, as our accessor methods will lift `nil` into
 	// those nested types.
-	var markOptionalPropertyTypesAsRequiringPtr func(seen stringSet, props []*schema.Property, parentOptional bool)
-	markOptionalPropertyTypesAsRequiringPtr = func(seen stringSet, props []*schema.Property, parentOptional bool) {
+	var markOptionalPropertyTypesAsRequiringPtr func(seen codegen.StringSet, props []*schema.Property, parentOptional bool)
+	markOptionalPropertyTypesAsRequiringPtr = func(seen codegen.StringSet, props []*schema.Property, parentOptional bool) {
 		for _, p := range props {
 			if obj, ok := p.Type.(*schema.ObjectType); ok && (!p.IsRequired || parentOptional) {
-				if seen.has(obj.Token) {
+				if seen.Has(obj.Token) {
 					continue
 				}
 
-				seen.add(obj.Token)
+				seen.Add(obj.Token)
 				getPkgFromToken(obj.Token).detailsForType(obj).ptrElement = true
 				markOptionalPropertyTypesAsRequiringPtr(seen, obj.Properties, true)
 			}
 			if enum, ok := p.Type.(*schema.EnumType); ok && (!p.IsRequired || parentOptional) {
-				if seen.has(enum.Token) {
+				if seen.Has(enum.Token) {
 					continue
 				}
-				seen.add(enum.Token)
+				seen.Add(enum.Token)
 				getPkgFromToken(enum.Token).detailsForEnum(enum).ptrElement = true
 			}
 		}
@@ -1397,7 +1379,7 @@ func generatePackageContextMap(tool string, pkg *schema.Package, goInfo GoPackag
 	// Use a string set to track object types that have already been processed.
 	// This avoids recursively processing the same type. For example, in the
 	// Kubernetes package, JSONSchemaProps have properties whose type is itself.
-	seenMap := stringSet{}
+	seenMap := codegen.NewStringSet()
 	for _, t := range pkg.Types {
 		switch typ := t.(type) {
 		case *schema.ArrayType:
@@ -1422,14 +1404,14 @@ func generatePackageContextMap(tool string, pkg *schema.Package, goInfo GoPackag
 		pkg := getPkgFromToken(r.Token)
 		pkg.resources = append(pkg.resources, r)
 
-		pkg.names.add(resourceName(r))
-		pkg.names.add(resourceName(r) + "Args")
-		pkg.names.add(camel(resourceName(r)) + "Args")
-		pkg.names.add("New" + resourceName(r))
+		pkg.names.Add(resourceName(r))
+		pkg.names.Add(resourceName(r) + "Args")
+		pkg.names.Add(camel(resourceName(r)) + "Args")
+		pkg.names.Add("New" + resourceName(r))
 		if !r.IsProvider && !r.IsComponent {
-			pkg.names.add(resourceName(r) + "State")
-			pkg.names.add(camel(resourceName(r)) + "State")
-			pkg.names.add("Get" + resourceName(r))
+			pkg.names.Add(resourceName(r) + "State")
+			pkg.names.Add(camel(resourceName(r)) + "State")
+			pkg.names.Add("Get" + resourceName(r))
 		}
 
 		markOptionalPropertyTypesAsRequiringPtr(seenMap, r.InputProperties, !r.IsProvider)
@@ -1446,7 +1428,7 @@ func generatePackageContextMap(tool string, pkg *schema.Package, goInfo GoPackag
 		pkg.functions = append(pkg.functions, f)
 
 		name := tokenToName(f.Token)
-		if pkg.names.has(name) {
+		if pkg.names.Has(name) {
 			switch {
 			case strings.HasPrefix(name, "New"):
 				name = "Create" + name[3:]
@@ -1454,14 +1436,14 @@ func generatePackageContextMap(tool string, pkg *schema.Package, goInfo GoPackag
 				name = "Lookup" + name[3:]
 			}
 		}
-		pkg.names.add(name)
+		pkg.names.Add(name)
 		pkg.functionNames[f] = name
 
 		if f.Inputs != nil {
-			pkg.names.add(name + "Args")
+			pkg.names.Add(name + "Args")
 		}
 		if f.Outputs != nil {
-			pkg.names.add(name + "Result")
+			pkg.names.Add(name + "Result")
 		}
 	}
 
@@ -1547,7 +1529,8 @@ func GeneratePackage(tool string, pkg *schema.Package) (map[string][]byte, error
 		// Run Go formatter on the code before saving to disk
 		formattedSource, err := format.Source([]byte(contents))
 		if err != nil {
-			panic(errors.Wrapf(err, "invalid Go source code:\n\n%s: %s", relPath, contents))
+			fmt.Fprintf(os.Stderr, "Invalid content:\n%s\n%s\n", relPath, contents)
+			panic(errors.Wrapf(err, "invalid Go source code:\n\n%s\n", relPath))
 		}
 
 		files[relPath] = formattedSource
@@ -1585,11 +1568,11 @@ func GeneratePackage(tool string, pkg *schema.Package) (map[string][]byte, error
 
 		// Resources
 		for _, r := range pkg.resources {
-			imports := stringSet{}
-			pkg.getImports(r, imports)
+			importsAndAliases := map[string]string{}
+			pkg.getImports(r, importsAndAliases)
 
 			buffer := &bytes.Buffer{}
-			pkg.genHeader(buffer, []string{"context", "reflect"}, imports)
+			pkg.genHeader(buffer, []string{"context", "reflect"}, importsAndAliases)
 
 			if err := pkg.genResource(buffer, r); err != nil {
 				return nil, err
@@ -1600,11 +1583,11 @@ func GeneratePackage(tool string, pkg *schema.Package) (map[string][]byte, error
 
 		// Functions
 		for _, f := range pkg.functions {
-			imports := stringSet{}
-			pkg.getImports(f, imports)
+			importsAndAliases := map[string]string{}
+			pkg.getImports(f, importsAndAliases)
 
 			buffer := &bytes.Buffer{}
-			pkg.genHeader(buffer, nil, imports)
+			pkg.genHeader(buffer, nil, importsAndAliases)
 
 			pkg.genFunction(buffer, f)
 
@@ -1613,13 +1596,13 @@ func GeneratePackage(tool string, pkg *schema.Package) (map[string][]byte, error
 
 		// Types
 		if len(pkg.types) > 0 {
-			imports := stringSet{}
+			importsAndAliases := map[string]string{}
 			for _, t := range pkg.types {
-				pkg.getImports(t, imports)
+				pkg.getImports(t, importsAndAliases)
 			}
 
 			buffer := &bytes.Buffer{}
-			pkg.genHeader(buffer, []string{"context", "reflect"}, imports)
+			pkg.genHeader(buffer, []string{"context", "reflect"}, importsAndAliases)
 
 			for _, t := range pkg.types {
 				pkg.genType(buffer, t)
@@ -1632,7 +1615,7 @@ func GeneratePackage(tool string, pkg *schema.Package) (map[string][]byte, error
 
 		// Enums
 		if len(pkg.enums) > 0 {
-			imports := stringSet{}
+			imports := map[string]string{}
 			for _, e := range pkg.enums {
 				pkg.getImports(e, imports)
 			}
@@ -1651,8 +1634,8 @@ func GeneratePackage(tool string, pkg *schema.Package) (map[string][]byte, error
 		// Utilities
 		if pkg.needsUtils {
 			buffer := &bytes.Buffer{}
-			imports := newStringSet("github.com/pulumi/pulumi/sdk/v2/go/pulumi")
-			pkg.genHeader(buffer, []string{"os", "strconv", "strings"}, imports)
+			importsAndAliases := map[string]string{"github.com/pulumi/pulumi/sdk/v2/go/pulumi": ""}
+			pkg.genHeader(buffer, []string{"os", "strconv", "strings"}, importsAndAliases)
 
 			fmt.Fprintf(buffer, "%s", utilitiesFile)
 
